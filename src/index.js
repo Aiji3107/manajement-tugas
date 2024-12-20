@@ -1,220 +1,155 @@
+// Import modules
 const express = require("express");
 const dotenv = require("dotenv");
-
 const { PrismaClient } = require("@prisma/client");
-const prisma = new PrismaClient();
-
-dotenv.config();
-
-const app = express();
-const PORT = process.env.PORT;
-
 const jwt = require("jsonwebtoken");
 const bcrypt = require("bcrypt");
+
+dotenv.config();
+const app = express();
+const prisma = new PrismaClient();
+const PORT = process.env.PORT || 3000;
 
 // Middleware
 app.use(express.json());
 
+// Authentication middleware
 const authToken = (req, res, next) => {
-  const token = req.headers.authtorization?.split(" ")[1]; //Mengambil token dari header authorization
+  const token = req.headers.authorization?.split(" ")[1];
 
   if (!token) {
-    return res.status(401).send({
-      message: "Access denied. No token provided.",
-    });
+    return res.status(401).json({ message: "Access denied. No token provided." });
   }
-  const decode = jwt.verify(token, JWT_SECRET); //verify token
-  req.userId = decode.userId;
-  next();
+
+  try {
+    const decoded = jwt.verify(token, process.env.SECRET_KEY);
+    req.userId = decoded.userId;
+    next();
+  } catch (err) {
+    return res.status(401).json({ message: "Invalid token." });
+  }
 };
 
+// Routes
+
+// Root endpoint
 app.get("/", (req, res) => {
   res.send("Hello World!");
 });
 
-app.listen(PORT, () => {
-  console.log("Express API running in PORT " + PORT);
-});
-
-// Post Login
+// User Authentication
 app.post("/login", async (req, res) => {
-  const newUser = req.body;
-  const user = await prisma.user.findUnique({
-    where: { email: newUser.email },
-  });
-  if (!user) {
-    return res.status(401).json({ message: "Email or password is incorrect" });
+  const { email, password } = req.body;
+
+  try {
+    const user = await prisma.user.findUnique({ where: { email } });
+    if (!user || !(await bcrypt.compare(password, user.password))) {
+      return res.status(401).json({ message: "Email or password is incorrect" });
+    }
+
+    const token = jwt.sign({ userId: user.id }, process.env.SECRET_KEY, { expiresIn: "1h" });
+    res.json({ message: "Login Success", token });
+  } catch (error) {
+    res.status(500).json({ message: "Error logging in", error: error.message });
   }
-  const isValidPassword = await bcrypt.compare(newUser.password, user.password);
-  // Check Password
-  if (!isValidPassword) {
-    return res.status(401).json({ message: "Email or password is incorrect" });
-  }
-  // Token JWT
-  const token = jwt.sign({ userId: user.id }, process.env.SECRET_KEY, {
-    expiresIn: "1h",
-  });
-  res.send({
-    message: "Login Success",
-    token,
-  });
 });
 
-// POST Register
 app.post("/register", async (req, res) => {
   const { email, password, username } = req.body;
 
-  // Validasi input
   if (!email || !password || !username) {
     return res.status(400).json({ message: "Email, password, and username are required" });
   }
 
-  // Cek apakah email sudah terdaftar
-  const existingUser = await prisma.user.findUnique({
-    where: { email: email },
-  });
-  if (existingUser) {
-    return res.status(400).json({ message: "Email is already in use" });
-  }
-
-  // Hash password
-  const hashedPassword = await bcrypt.hash(password, 10);
-
-  // Buat pengguna baru di database
   try {
+    const existingUser = await prisma.user.findUnique({ where: { email } });
+    if (existingUser) {
+      return res.status(400).json({ message: "Email is already in use" });
+    }
+
+    const hashedPassword = await bcrypt.hash(password, 10);
     const newUser = await prisma.user.create({
-      data: {
-        email: email,
-        password: hashedPassword, // Simpan password yang sudah di-hash
-        username: username
-      },
+      data: { email, password: hashedPassword, username },
     });
 
-    // Buat JWT Token
-    const token = jwt.sign({ userId: newUser.id }, process.env.SECRET_KEY, {
-      expiresIn: "1h", // Token berlaku 1 jam
-    });
-
-    res.status(201).json({
-      message: "User created successfully",
-      token, // Kirim token JWT ke pengguna
-    });
+    const token = jwt.sign({ userId: newUser.id }, process.env.SECRET_KEY, { expiresIn: "1h" });
+    res.status(201).json({ message: "User created successfully", token });
   } catch (error) {
-    res.status(500).json({
-      message: "Error creating user",
-      error: error.message,
-    });
+    res.status(500).json({ message: "Error creating user", error: error.message });
   }
 });
 
-// POST Task
+// Task Management
 app.post("/task", authToken, async (req, res) => {
-  const newTask = req.body;
-
-  // Periksa apakah data yang diperlukan ada
-  if (!newTask.userId) {
-    return res.status(400).json({ message: " userId are required" });
-  }
+  const { title, description, status = "PENDING", priority = "MEDIUM", dueDate } = req.body;
 
   try {
     const task = await prisma.task.create({
-      data: {
-        title : newTask.title,
-        description : newTask.description, // Opsional
-        status: newTask.status || "PENDING", // Jika tidak diberikan, gunakan default
-        priority: newTask.priority || "MEDIUM", // Jika tidak diberikan, gunakan default
-        dueDate: newTask.dueDate, // Opsional
-        userId: newTask.userId, // ID user yang membuat task
-      },
+      data: { title, description, status, priority, dueDate, userId: req.userId },
     });
-
-    res.send({
-      message: "Task created successfully",
-      data: task,
-    });
+    res.json({ message: "Task created successfully", data: task });
   } catch (error) {
     res.status(500).json({ message: "Error creating task", error: error.message });
   }
 });
 
+app.put("/task/:taskId", authToken, async (req, res) => {
+  const { taskId } = req.params;
+  const { title, description, status, priority, dueDate } = req.body;
 
-// put Task
-app.put("/task", async (req, res) => {
-  const taskId = req.params.taskId;
-  const newTask = req.body();
-
-  const task = await prisma.task.update({
-    where: {
-      id: taskId,
-    },
-    data: {
-      title: newTask.title,
-      description: newTask.description,
-    },
-  });
-  res.send({
-    message: "Task updated successfully",
-    data: task,
-  });
+  try {
+    const updatedTask = await prisma.task.update({
+      where: { id: taskId },
+      data: { title, description, status, priority, dueDate },
+    });
+    res.json({ message: "Task updated successfully", data: updatedTask });
+  } catch (error) {
+    res.status(500).json({ message: "Error updating task", error: error.message });
+  }
 });
 
-// delete Task
-app.delete("/tasks/:taskId", async (req, res) => {
-  const taskId = req.params.taskId;
-  await prisma.task.delete({
-    where: {
-      id: taskId,
-    },
-  });
-  res.send({
-    message: "Task deleted successfully",
-  });
+app.delete("/task/:taskId", authToken, async (req, res) => {
+  const { taskId } = req.params;
+
+  try {
+    await prisma.task.delete({ where: { id: taskId } });
+    res.json({ message: "Task deleted successfully" });
+  } catch (error) {
+    res.status(500).json({ message: "Error deleting task", error: error.message });
+  }
 });
 
-// Get TASKS
 app.get("/task", authToken, async (req, res) => {
-  // Panggil prisma tasks
-  const tasks = await prisma.task.findMany({
-    where: {
-      userId: req.userId,
-    },
-  });
-  res.send(tasks);
+  try {
+    const tasks = await prisma.task.findMany({ where: { userId: req.userId } });
+    res.json(tasks);
+  } catch (error) {
+    res.status(500).json({ message: "Error retrieving tasks", error: error.message });
+  }
 });
 
-// POST user
-app.post("/user", async (req, res) => {
-  const newUser = req.body;
-
-  // hashedpassword
-  const hashedPassword = await bcrypt.hash(newUser.password, 10);
-  const user = await prisma.user.create({
-    data: {
-      username: newUser.username,
-      email: newUser.email,
-      password: hashedPassword,
-    },
-  });
-
-  res.send({
-    message: "User created successfully",
-    data: user,
-  });
-});
-
-// Get USERS
+// User Management
 app.get("/user", async (req, res) => {
-  const users = await prisma.user.findMany();
-  res.send(users);
+  try {
+    const users = await prisma.user.findMany();
+    res.json(users);
+  } catch (error) {
+    res.status(500).json({ message: "Error retrieving users", error: error.message });
+  }
 });
 
 app.delete("/user/:userId", async (req, res) => {
-  const userId = req.params.userId;
+  const { userId } = req.params;
 
-  await prisma.user.delete({
-    where: {
-      id: userId,
-    },
-  });
-  res.send({ message: "User deleted successfully" });
+  try {
+    await prisma.user.delete({ where: { id: userId } });
+    res.json({ message: "User deleted successfully" });
+  } catch (error) {
+    res.status(500).json({ message: "Error deleting user", error: error.message });
+  }
+});
+
+// Start server
+app.listen(PORT, () => {
+  console.log(`Express API running on PORT ${PORT}`);
 });
