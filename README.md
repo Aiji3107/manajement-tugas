@@ -22,7 +22,7 @@
 
 4. **Run the Server**:
    ```bash
-   npm start
+   node .
    ```
 
 ---
